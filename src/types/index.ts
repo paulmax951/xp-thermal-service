@@ -232,7 +232,11 @@ export interface ReceiptRenderFields {
   qrCode: boolean;
   footerMessage: boolean;
   thankYou: boolean;
-  poweredBy: boolean;
+  /**
+   * Always true: the credit is not switchable, and the templates print it
+   * whatever this says. Kept in the contract for the POS side's mirror.
+   */
+  poweredBy: true;
 }
 
 export interface ReceiptRenderOptions {

@@ -1,338 +1,330 @@
+<div align="center">
+
 # XP Thermal Service
 
-A local thermal printing service for restaurant POS systems. It runs as a Windows service, finds your receipt printers by itself, keeps working when Windows gets in the way, and exposes a small HTTP API your POS can call. Powered by [XenithPulse.com](https://xenithpulse.com).
+**Free, open-source thermal printing for web POS apps. A zero-fee alternative to QZ Tray.**
 
-Designed as a zero-maintenance replacement for QZ Tray: no browser extension, no certificates, no per-till babysitting.
+Print receipts, kitchen tickets (KOT), barcodes and QR codes from any browser app to USB or network ESC/POS printers, through a self-healing Windows service.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%207%20%7C%2010%20%7C%2011-blue)
+![Node](https://img.shields.io/badge/node-18%2B-brightgreen)
+[![Latest release](https://img.shields.io/github/v/release/xenithpulse/xp-thermal-service)](https://github.com/xenithpulse/xp-thermal-service/releases/latest)
+
+[**Download**](https://github.com/xenithpulse/xp-thermal-service/releases/latest) · [Product page](https://xenithpulse.com/products/thermal-printer-service) · [XP Restaurant POS](https://xenithpulse.com/products/restaurant-pos) · [Need integration help?](https://wa.me/97455911793?text=XP%20Thermal%20Service%20integration)
+
+<!-- Add these two images to a /docs folder in the repo -->
+<img src="docs/dashboard.png" alt="XP Thermal Service web dashboard" width="720">
+
+<img src="docs/receipt.jpg" alt="Receipt and KOT printed with XP Thermal Service" width="720">
+
+</div>
 
 ---
 
 ## Why this exists
 
-Thermal printing on Windows fails in ways that have nothing to do with the printer. This service exists because of specific, reproducible failures — each one is handled below, and each fix was verified against real hardware rather than assumed.
+Browsers can't talk to thermal printers directly, so most web POS systems rely on QZ Tray and pay a licence per deployment. We needed reliable printing for our own [XP Restaurant POS](https://xenithpulse.com/products/restaurant-pos), so we built a production-grade service and open-sourced it.
 
-**The printer works, but the software says it's offline.**
-Windows sets a `WorkOffline` flag on a print queue when a USB device disappears, and frequently never clears it when the device comes back. Captured from a real XPrinter-class device that was printing Windows test pages perfectly:
+| | XP Thermal Service | QZ Tray |
+| --- | --- | --- |
+| Silent printing (no trust warnings) | Free | Requires Premium Support certificate ($599/year) |
+| Licence | MIT | LGPL 2.1 |
+| Install | One-click `setup.bat` | Desktop installer + certificate signing setup |
+| Runs as | Self-healing Windows service | Tray app |
+| Built-in receipt/KOT templates | Yes, send JSON | No, you build the print data |
 
-```
-Name        : Generic / Text Only
-PortName    : USB011
-WorkOffline : True      <- naive check reports OFFLINE
-PrinterState: 0         <- Ready
-DetectedErrorState : 0  <- no error
-```
+<sub>QZ Tray pricing from buy.qz.io as of October 2026; verify current terms with QZ.</sub>
 
-This service never trusts that flag on its own. It must be corroborated by a real fault or by physical absence, and the stale flag is cleared automatically in the background.
+## Built into XP Restaurant POS
 
-**"It only works on the USB port it was installed on."**
-Every physical socket a printer is plugged into mints a new Windows port. On the reference machine that produced `USB001` through `USB018`, with eight stale device instances left in the registry. The print queue stays pinned to whichever port existed at install time, so moving the cable silently breaks printing.
+XP Thermal Service ships **built in** with [XP Restaurant POS](https://xenithpulse.com/products/restaurant-pos). It installs as one of the POS's Windows services and handles receipts, KOTs and the cash drawer out of the box, with no extra setup.
 
-The service reads the live device-to-port mapping from `HKLM\SYSTEM\CurrentControlSet\Enum\<device>\Device Parameters\PortName`, notices the migration, and repoints the queue. **Move the cable to any socket and it follows.**
+Want the whole system instead of building your own? **XP Restaurant POS is $299 once, with no subscription and unlimited tills.** [See the POS →](https://xenithpulse.com/products/restaurant-pos)
 
-**Windows itself is broken on some machines.**
-A field machine reported:
-
-```
-Could not enumerate printers: Invalid class "Win32_Printer"
-Could not enumerate USB printing devices: Invalid class "Win32_PnPEntity"
-```
-
-That is a damaged WMI repository — the Print Spooler was running fine, but every printer was invisible. The service now reaches printers through **four independent paths** and keeps working when WMI is gone (see [Resilience](#resilience)).
-
----
+Building your own POS? Use this service standalone. It works with any web app that can send an HTTP request.
 
 ## Features
 
-### Connectivity — the part that actually matters
-
-- **Corroborated status.** `WorkOffline` alone never means offline. Unknown status codes mean *ready*, not *error* — cheap thermal units report `PrinterStatus` 1 ("Other") or 2 ("Unknown") while working perfectly.
-- **Follows the cable.** Detects USB port migration and repoints the queue automatically. Works through hubs and Type-C docks.
-- **Follows renames.** When a driver reinstall creates `XP-80C (Copy 1)`, the service recognises it and rebinds — but never onto a queue another configured printer already owns, so kitchen tickets can't be hijacked by the receipt printer.
-- **Refuses to guess.** With several indistinguishable printers on a hub, it asks rather than risking order tickets going to the wrong station.
-- **Survives a damaged WMI repository** via direct spooler enumeration.
-- **Ground truth is the write.** A completed write marks a printer online regardless of what Windows claims about it.
-
-### Detection speed
-
-- **Event-driven, not polled.** Subscribes to `Win32_DeviceChangeEvent` (extrinsic — instant, zero polling cost) and a 2-second intrinsic watch on `Win32_Printer`. A plug or unplug is noticed in about **one second**.
-- **Live dashboard.** Server-sent events push state to the browser as it changes; current state arrives within ~10ms of opening the page.
-- **Degrades, never breaks.** If WMI events are unavailable, it falls back to faster polling and says so.
-
-### Setup
-
-- **Role-based.** Choose *Receipt*, *Kitchen (KOT)*, *Bar* or *Labels*. The role becomes the printer id, so your POS can always address `receipt` and `kitchen` without a lookup. Paper width, capabilities, cash-drawer defaults and identity breadcrumbs are all derived — nothing to type.
-- **Ranked discovery.** Real receipt printers are scored and listed first; `Microsoft Print to PDF`, XPS and Fax are excluded.
-- **Tells you when a driver is missing.** A printer plugged in with no driver is the most common "it doesn't detect my printer" case on a fresh machine. It is reported explicitly instead of showing an empty list.
-
-### Self-repair
-
-An ordered, least-invasive ladder, run automatically and on demand:
-
-1. Repoint a migrated USB port
-2. Clear a stale "Use Printer Offline" flag
-3. Resume a paused queue / clear jobs wedged behind a failed one
-4. Restart the Print Spooler
-
-Physical problems are deliberately **not** auto-healed. Out of paper gets an instruction, not a repair loop.
-
-### Durability
-
-- **No silently lost receipts.** The job store batches saves; every abrupt exit path — restart, watchdog, uncaught exception — flushes first.
-- **Restarts drain.** In-flight receipts finish before exit, bounded at 8 seconds so a restart never hangs a till.
-- **One instance only.** A PID lock stops a second copy starting and corrupting `config.json`. It waits out a restart handover rather than refusing, and takes over a stale lock left by a hard reset.
-- **Config is never destroyed.** A file that fails to parse is backed up and the service refuses to overwrite it. UTF-8 BOMs (Notepad, `Out-File`) are handled. Concurrent writers are merged instead of clobbered.
-
-### Everything else
-
-- USB and network printers, ESC/POS with barcodes, QR codes and formatting
-- Templates: receipt, KOT, invoice, test, raw
-- Cash drawer: pin 2/5, configurable pulse, open-on-print, test pulse before saving
-- Priority queue, idempotency keys, retry with exponential backoff
-- Automatic port fallback (9100–9109) with published endpoint descriptors
-- Windows service with SCM recovery, watchdog and delayed auto-start
-
----
+- **Bulletproof Installation**: One-click `setup.bat` with pre-flight checks, retry logic, and automatic recovery
+- **Self-Healing Service**: Auto-restart on crash (5s/10s/30s delays), watchdog every 5 minutes, delayed auto-start on boot
+- **Multiple Printers**: Support for USB and network thermal printers with auto-discovery
+- **ESC/POS Support**: Full ESC/POS command support including barcodes, QR codes, and formatting
+- **Templates**: Built-in templates for receipts, KOT, invoices, labels, test pages, and raw ESC/POS
+- **Secure API**: Localhost-only binding, CORS protection, Chrome Private Network Access (PNA) support, rate limiting with burst protection
+- **Smart Port Handling**: Automatic port fallback (9100–9110) if primary port is busy
+- **Job Persistence**: SQLite-backed queue with crash recovery and automatic database repair
+- **Idempotent**: Duplicate job prevention with idempotency keys
+- **Queue Management**: Priority queuing, concurrent job processing, pause/resume
+- **Health Monitoring**: Always-healthy liveness endpoint (only degrades during USB scanning), metrics, and dashboard
+- **Config Auto-Recovery**: Corrupt config.json is backed up and rebuilt from example automatically
 
 ## Quick Start
 
 ### One-Click Install (Recommended)
 
-Double-click `setup.bat` as Administrator. It will:
+1. Download the latest zip from [**Releases**](https://github.com/xenithpulse/xp-thermal-service/releases/latest) and extract it.
+2. Right-click `setup.bat` → **Run as administrator**. It will:
+   1. Check for Node.js 18+
+   2. Install dependencies
+   3. Build the TypeScript project
+   4. Create `config.json` from example if missing
+   5. Install as a Windows service with auto-start
+   6. Open the dashboard in your browser
+3. Send a test print from the dashboard at `http://localhost:9100/dashboard`.
 
-1. Check for Node.js 18+
-2. Install dependencies
-3. Build the TypeScript project
-4. Create `config.json` from example if missing
-5. Install as a Windows service with auto-start, SCM recovery, and a Print Spooler dependency
-6. Open the dashboard in your browser
+### Your first print
 
-### Set up a printer
-
-Open `http://127.0.0.1:9100/dashboard` → **Printers** → **Find Printers**, then press **Use as Receipt** or **Use as Kitchen** next to your printer. A test receipt is sent automatically.
-
-That is the whole setup. No ids, no capability checkboxes, no paper-width arithmetic.
+```js
+await fetch("http://localhost:9100/api/print", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    idempotencyKey: "order-4821-kot",
+    printerId: "kitchen",
+    templateType: "kot",
+    payload: {
+      orderNumber: "4821",
+      tableName: "Table 12",
+      items: [
+        { name: "Margherita", quantity: 2 },
+        { name: "Garlic Bread", quantity: 1 }
+      ]
+    }
+  })
+});
+```
 
 ### Manual Installation
 
 ```bash
-git clone https://github.com/your-org/xp-thermal-service.git
+# Clone the repository
+git clone https://github.com/xenithpulse/xp-thermal-service.git
 cd xp-thermal-service
 
+# Install dependencies
 npm install
+
+# Copy and configure
 cp config.example.json config.json
+# Edit config.json with your printer settings
+
+# Build
 npm run build
+
+# Start (foreground)
 npm start
 ```
 
 ### As a Windows Service
 
 ```bash
-npm run service:install     # requires Administrator
+# Install as Windows service (requires Administrator)
+npm run service:install
+
+# Start the service
 npm run service:start
+
+# Stop the service
 npm run service:stop
+
+# Uninstall
 npm run service:uninstall
 ```
 
 ### PowerShell Installer (Advanced)
 
 ```powershell
-.\scripts\install.ps1            # Install
-.\scripts\install.ps1 -Repair    # Reinstall without losing config
-.\scripts\install.ps1 -Start     # Start / Stop / Restart
+# Install (Run PowerShell as Administrator)
+.\scripts\install.ps1
+
+# Repair (reinstall without losing config)
+.\scripts\install.ps1 -Repair
+
+# Start / Stop / Restart
+.\scripts\install.ps1 -Start
+.\scripts\install.ps1 -Stop
+.\scripts\install.ps1 -Restart
+
+# Uninstall
+.\scripts\install.ps1 -Uninstall
+
+# Silent install (no console output)
+.\scripts\install.ps1 -Silent
+
+# Custom config file
+.\scripts\install.ps1 -ConfigPath "C:\path\to\config.json"
 ```
-
-> **Updating an existing install:** the deployed copy does not update itself. Re-run the installer on each machine. `Restart-Service` alone does **not** cycle the Node child process — use the dashboard's restart, or `POST /api/service/restart`.
-
----
-
-## Resilience
-
-### Four independent paths to your printers
-
-Tried in order, first success wins:
-
-| # | Path | Survives |
-|---|------|----------|
-| 1 | `Get-CimInstance Win32_Printer` | — |
-| 2 | `Get-WmiObject Win32_Printer` | Older PowerShell |
-| 3 | **`winspool.drv` EnumPrinters** | **Damaged WMI repository** |
-| 4 | **`Get-Printer`** (`root\standardcimv2`) | Damaged WMI *and* blocked `Add-Type` |
-
-Path 3 talks to the Print Spooler directly with no WMI involved. `PRINTER_INFO_2.Status` uses the same bit values as WMI's `PrinterState`, and `Attributes` carries the `WorkOffline` flag, so the status logic needs no special-casing — it loses almost nothing.
-
-Verified by simulating the failure on a healthy machine:
-
-```
-===== WMI BROKEN (simulated) =====
-  wmiHealthy=false  presenceDegraded=true
-  os="Windows 10 Pro for Workstations"   <- registry, not WMI
-  spooler=true  printers=3  usbDevices=1 <- registry, not WMI
-   - Generic / Text Only  port=USB016  verdict=online  printable=true
-   - Canon G3020 series   state=128    verdict=offline
-```
-
-The OS name and USB presence also have registry-based fallbacks. When presence detection is degraded, absence is treated as **unknown** rather than "unplugged" — reporting a working printer as disconnected is the worse mistake.
-
-The dashboard explains the situation in plain language and gives the repair command (`winmgmt /salvagerepository`), with the raw errors tucked into a collapsed "Technical details" section.
-
-To exercise the fallback on a healthy machine, set `XP_FORCE_SPOOLER_FALLBACK=1`.
-
-### Printing without runtime compilation
-
-The winspool shim is compiled **once at startup** into `data/RawPrinterHelper.dll` instead of on every job. Measured: **~600ms of C# compilation per receipt → ~180ms to load the cached assembly.** More importantly it removes the dependency on a working C# compiler and writable `%TEMP%` at print time, which matters on locked-down machines. Inline compilation remains as a fallback.
-
-### Errors in plain language
-
-Win32 spooler codes are translated. `WritePrinter failed (win32 error 1801)` becomes:
-
-> The printer name is not valid — the queue may have been renamed or removed. (Windows error 1801)
-
-Failed jobs show their reason inline in the dashboard. An offline printer can never report a successful cash-drawer pulse.
-
----
 
 ## API Reference
 
-Base URL: `http://127.0.0.1:9100` (see [Smart Port Handling](#smart-port-handling)).
+### Health Check
 
-### Health & identity
-
-```bash
-GET /health
 ```
+GET http://localhost:9100/health
+```
+
+Response (always HTTP 200 unless actively scanning USB ports):
 
 ```json
 {
   "status": "healthy",
-  "service": "xp-thermal-service",
-  "port": 9100,
-  "configuredPort": 9100,
-  "uptime": 123456,
-  "printers": { "total": 2, "online": 2, "offline": 0, "error": 0 },
+  "uptime": 3600000,
+  "version": "1.0.0",
+  "printers": { "total": 2, "online": 1, "offline": 1, "initializing": false },
   "queue": { "pending": 0, "processing": 0, "failed": 0 }
 }
 ```
 
-The `service` field lets a client scanning 9100–9109 confirm it found the right process. The port is also returned in an `X-Service-Port` header on every response.
+> **Note:** The health endpoint returns `"status": "healthy"` even when printers are offline, since printers being offline is normal. It only returns `"status": "initializing"` during active USB port scanning at startup.
 
-### Printing
+### Print a Receipt
 
-```bash
-POST /api/print
-POST /api/print/{printerId}
-```
+```http
+POST http://localhost:9100/api/print
+Content-Type: application/json
 
-```json
 {
-  "idempotencyKey": "order-1234-receipt",
-  "printerId": "receipt",
+  "idempotencyKey": "order-12345-receipt",
   "templateType": "receipt",
-  "copies": 1,
-  "priority": "high",
-  "payload": { "orderNumber": "1234", "items": [] },
-  "metadata": { "openCashDrawer": true }
+  "payload": {
+    "orderNumber": "12345",
+    "orderDate": "2026-01-15",
+    "items": [
+      {"name": "Burger", "quantity": 2, "price": 12.99, "total": 25.98},
+      {"name": "Fries", "quantity": 2, "price": 4.99, "total": 9.98}
+    ],
+    "subtotal": 35.96,
+    "tax": 2.88,
+    "total": 38.84,
+    "header": {
+      "storeName": "Joe's Diner",
+      "storeAddress": ["123 Main St", "City, State 12345"],
+      "storePhone": "(555) 123-4567"
+    },
+    "footer": {
+      "thankYouMessage": "Thank you for dining with us!"
+    }
+  }
 }
 ```
 
-### Discovery & setup
+### Print a Kitchen Order Ticket (KOT)
 
-```bash
-GET  /api/printers/discover          # ranked candidates + printers needing a driver
-GET  /api/printers/discover?all=1    # include virtual queues (PDF/XPS/Fax)
-GET  /api/printers/roles             # receipt / kitchen / bar / label
-POST /api/printers/setup             # { role, windowsName, test }
-POST /api/printers/auto-setup        # configure every recommended thermal printer
+```http
+POST http://localhost:9100/api/print
+Content-Type: application/json
+
+{
+  "idempotencyKey": "order-12345-kot-kitchen",
+  "printerId": "kitchen",
+  "templateType": "kot",
+  "priority": 2,
+  "payload": {
+    "orderNumber": "12345",
+    "tableName": "Table 5",
+    "serverName": "John",
+    "orderTime": "14:35",
+    "items": [
+      {"name": "Burger", "quantity": 2, "modifiers": ["No onions", "Extra cheese"]},
+      {"name": "Fries", "quantity": 2, "notes": "Extra crispy"}
+    ],
+    "notes": "Rush order"
+  }
+}
 ```
 
-`POST /api/printers/setup` is the whole add-a-printer flow. Re-running it for an existing role repoints that role at a different printer — what you want when replacing a broken unit.
+### Print to a Specific Printer
 
-### Diagnosis & repair
+```http
+POST http://localhost:9100/api/print/kitchen
+Content-Type: application/json
 
-```bash
-GET  /api/printers/{printerId}/diagnose   # what Windows says, what we concluded, why
-POST /api/printers/{printerId}/repair     # run the repair ladder
-GET  /api/system/print-system             # raw snapshot, for support
+{
+  "idempotencyKey": "order-12345-kot",
+  "templateType": "kot",
+  "payload": { ... }
+}
 ```
 
-`diagnose` returns the reasoning, not just a status: whether the queue was found, which queue it is bound to, the `WorkOffline` flag, physical presence, port migration and suggested port, reported faults, spooler state — plus the repair plan and any manual instruction.
+### Job Management
 
-### Live updates
-
-```bash
-GET /api/events        # Server-Sent Events
+```
+GET    /api/jobs/{jobId}                 # Job details
+GET    /api/jobs/{jobId}/status          # Status with history
+GET    /api/jobs?status=pending&limit=50 # List jobs (filters: status, printerId, limit)
+DELETE /api/jobs/{jobId}                 # Cancel a job
+POST   /api/jobs/{jobId}/retry           # Retry a failed job
+POST   /api/jobs/clear-failed            # Clear all failed jobs
 ```
 
-Pushes `printers` events on every state change. Current state is sent immediately on connect. Because `EventSource` cannot set headers, this endpoint also accepts the API key as `?key=`.
+### Printer Management
 
-### Printers, jobs, queue
-
-```bash
-GET    /api/printers
-GET    /api/printers/{printerId}
-GET    /api/printers/{printerId}/status
-POST   /api/printers/{printerId}/test
-POST   /api/printers/{printerId}/reconnect
-POST   /api/printers/{printerId}/cash-drawer   # { pin, onTimeMs, offTimeMs }
-
-GET    /api/jobs?status=failed&limit=50
-GET    /api/jobs/{jobId}
-GET    /api/jobs/{jobId}/status
-POST   /api/jobs/{jobId}/retry
-DELETE /api/jobs/{jobId}
-POST   /api/jobs/clear-failed
-
-GET    /api/queue/stats
-POST   /api/queue/pause
-POST   /api/queue/resume
+```
+GET  /api/printers                       # List all printers
+GET  /api/printers/{printerId}           # Printer details
+GET  /api/printers/{printerId}/status    # Printer status
+POST /api/printers/{printerId}/test      # Send a test print
+POST /api/printers/{printerId}/reconnect # Reconnect a printer
+GET  /api/system/printers                # System-detected printers (Windows)
 ```
 
-### Configuration & system
+### Queue Management
 
-```bash
-GET    /api/config
-PUT    /api/config/server
-PUT    /api/config/security
-GET    /api/system/printers
-POST   /api/config/printers
-PUT    /api/config/printers/{printerId}
-DELETE /api/config/printers/{printerId}
+```
+GET  /api/queue/stats   # Queue stats
+POST /api/queue/pause   # Pause the queue
+POST /api/queue/resume  # Resume the queue
+```
 
-GET    /api/metrics            # includes printerEvents.mode: event-driven | polling
-GET    /api/system/info
-GET    /api/system/connections
-POST   /api/service/restart    # loopback only; drains in-flight work first
-GET    /api/auth/local-token   # loopback only
+### System & Metrics
+
+```
+GET /api/metrics             # Service metrics
+GET /api/system/info         # System info
+GET /api/system/connections  # Active connections
+```
+
+### Configuration Management
+
+```
+GET    /api/config                        # Current config
+PUT    /api/config/server                 # Update server settings
+PUT    /api/config/security               # Update security settings
+POST   /api/config/printers               # Add a printer
+PUT    /api/config/printers/{printerId}   # Update a printer
+DELETE /api/config/printers/{printerId}   # Delete a printer
 ```
 
 ### Dashboard
 
 ```
-http://127.0.0.1:9100/dashboard
+http://localhost:9100/dashboard
 ```
 
----
+Web-based dashboard for monitoring printers, queue, jobs, and managing configuration.
 
 ## Configuration
 
-`config.json` in the install directory. Copy `config.example.json` to get started.
+The service uses `config.json` in the project root. Copy `config.example.json` to get started:
 
 ```json
 {
-  "server": { "host": "127.0.0.1", "port": 9100, "enableHttps": false },
-
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9100,
+    "enableHttps": false
+  },
   "security": {
     "allowedOrigins": [
-      "http://pos.xenithpulse.local:8090",
-      "http://pos.xenithpulse.local:8080",
-      "http://127.0.0.1:8080",
-      "http://127.0.0.1:8090"
+      "http://localhost:3000",
+      "http://127.0.0.1:3000"
     ],
     "allowedHosts": ["localhost", "127.0.0.1"],
-    "allowPrivateNetwork": true,
     "rateLimitPerMinute": 120,
-    "enableApiKey": true,
+    "enableApiKey": false,
     "maxPayloadSize": 1048576
   },
-
   "queue": {
     "maxConcurrentJobs": 3,
     "maxRetries": 5,
@@ -344,273 +336,356 @@ http://127.0.0.1:9100/dashboard
     "maxJobAgeMs": 604800000,
     "persistPath": "./data/jobs.db"
   },
-
-  "logging": { "level": "info", "console": true },
-
+  "logging": {
+    "level": "info",
+    "file": "./logs/service.log",
+    "console": true
+  },
   "printers": [
     {
-      "id": "receipt",
-      "name": "Receipt",
-      "type": "usb",
+      "id": "cashier",
+      "name": "Cashier Receipt Printer",
+      "type": "network",
       "enabled": true,
       "isDefault": true,
+      "host": "192.168.1.101",
+      "port": 9100,
+      "timeout": 10000,
+      "maxRetries": 3,
+      "capabilities": {
+        "maxWidth": 48,
+        "supportsBold": true,
+        "supportsUnderline": true,
+        "supportsBarcode": true,
+        "supportsQRCode": true,
+        "supportsImage": false,
+        "supportsCut": true,
+        "supportsPartialCut": true,
+        "supportsCashDrawer": true,
+        "supportsDensity": true,
+        "codepage": 0
+      }
+    },
+    {
+      "id": "usb-receipt",
+      "name": "USB Receipt Printer",
+      "type": "usb",
+      "enabled": false,
+      "isDefault": false,
       "printerName": "XP-80C",
       "timeout": 10000,
       "maxRetries": 3,
-      "capabilities": { "maxWidth": 48, "supportsCashDrawer": true, "codepage": 0 },
-      "cashDrawer": {
-        "enabled": true,
-        "pin": 2,
-        "onTimeMs": 50,
-        "offTimeMs": 200,
-        "openOnPrint": true
-      },
-      "metadata": {
-        "role": "receipt",
-        "windowsPort": "USB016",
-        "windowsDriver": "Generic / Text Only",
-        "usbHardwareId": "USBPRINT\\UnknownPrinter"
+      "capabilities": {
+        "maxWidth": 48,
+        "supportsBold": true,
+        "supportsUnderline": true,
+        "supportsBarcode": true,
+        "supportsQRCode": true,
+        "supportsImage": false,
+        "supportsCut": true,
+        "supportsPartialCut": false,
+        "supportsCashDrawer": true,
+        "supportsDensity": true,
+        "codepage": 0
       }
     }
   ]
 }
 ```
 
-### Printer ids are roles
+> **Allowed origins:** add the exact URL of your POS (e.g. `https://your-pos.example.com`) to `security.allowedOrigins`. Avoid `"*"` in production: it lets any website you visit send jobs to your printer.
 
-`receipt`, `kitchen`, `bar`, `label`. Your POS addresses printers by role and never needs to know which physical device is behind one.
-
-### `metadata` is written by the service
-
-Identity breadcrumbs learned at runtime. They are how the service re-finds a printer that moved port or was renamed. Leave them alone; they are maintained automatically.
-
-### Cash drawer
-
-`pin` is 2 for almost all printers, 5 for a minority and for the second drawer of a twin setup. `onTimeMs`/`offTimeMs` are clamped to the 10–510ms the single-byte ESC/POS encoding allows. If a drawer does not open, try the other pin or a longer pulse — the dashboard has a **Test drawer now** button that fires with unsaved values.
-
-### CORS
-
-Loopback is trusted on **every port**, so the dashboard keeps working when the service falls back from 9100. `allowedOrigins` entries may contain wildcards (`https://*.pos.example.com`). `allowPrivateNetwork` lets POS terminals elsewhere on the LAN connect. The four POS origins above are added to every configuration automatically.
-
-A rejected origin gets a 403 that says exactly how to allow it, rather than an opaque CORS failure.
-
----
+> **Note for USB printers:** Set `printerName` to match your Windows printer name exactly as shown in Control Panel > Devices and Printers.
 
 ## Template Types
 
-| Type | Description |
-|------|-------------|
-| `receipt` | Header, items, totals, adjustments, payment info, optional barcode/QR |
-| `kot` | Kitchen ticket with large text, modifiers, special instructions |
-| `invoice` | Detailed invoice with customer info and line items |
-| `test` | Font samples, alignment tests, optional barcode/QR |
-| `raw` | Direct ESC/POS (hex, base64, or raw bytes) |
+| Type      | Description                                                                         |
+| --------- | ----------------------------------------------------------------------------------- |
+| `receipt` | Full receipt with header, items, totals, payment info, and optional barcode/QR code |
+| `kot`     | Kitchen order ticket with large text, modifiers, and special instructions           |
+| `invoice` | Detailed invoice with customer info and line items                                  |
+| `test`    | Test print with font samples, alignment tests, and optional barcode/QR code         |
+| `label`   | Label printing                                                                      |
+| `raw`     | Direct ESC/POS commands (hex, base64, or raw bytes)                                 |
 
-These five are the whole set — `templateType` is validated against them and anything else is a 400.
-
-Note that the **`label` role** is a different thing from a template: a role configures a printer (id, paper width, capabilities), a template renders content. A printer in the `label` role prints whichever of the five templates you send it, most often `raw`.
-
----
-
-## Connecting from XP-POS
-
-Find the service, then talk to it by role:
+## Integration with Next.js / React
 
 ```ts
-// Ports 9100-9109; confirm identity so you don't latch onto something else.
-async function findService(): Promise<string | null> {
-  for (let port = 9100; port <= 9109; port++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/health`, {
-        signal: AbortSignal.timeout(800)
-      });
-      if (!res.ok) continue;
-      const body = await res.json();
-      if (body.service && body.service !== 'xp-thermal-service') continue;
-      return `http://127.0.0.1:${port}`;
-    } catch { /* keep looking */ }
-  }
-  return null;
+// lib/print-service.ts
+const PRINT_SERVICE_URL = 'http://localhost:9100';
+
+export async function printReceipt(order: Order) {
+  const response = await fetch(`${PRINT_SERVICE_URL}/api/print`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      idempotencyKey: `order-${order.id}-receipt`,
+      templateType: 'receipt',
+      payload: {
+        orderNumber: order.id,
+        orderDate: new Date().toLocaleDateString(),
+        items: order.items.map(item => ({
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          total: item.quantity * item.price
+        })),
+        subtotal: order.subtotal,
+        tax: order.tax,
+        total: order.total
+      }
+    })
+  });
+
+  return response.json();
 }
 
-await fetch(`${base}/api/print`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-  body: JSON.stringify({
-    idempotencyKey: `order-${orderId}-receipt`,
-    printerId: 'receipt',
-    templateType: 'receipt',
-    payload: receipt
-  })
-});
+export async function checkPrintStatus(jobId: string) {
+  const response = await fetch(`${PRINT_SERVICE_URL}/api/jobs/${jobId}/status`);
+  return response.json();
+}
 ```
 
-The service also publishes its endpoint on disk, so a client need not scan at all:
+> **Chrome Private Network Access:** The service includes PNA headers (`Access-Control-Allow-Private-Network: true`) so public websites (e.g., deployed on Vercel) can call `localhost` without CORS errors in Chrome.
+
+## Error Handling
+
+| Code                | Description                          |
+| ------------------- | ------------------------------------ |
+| `PRINTER_NOT_FOUND` | Specified printer doesn't exist      |
+| `PRINTER_OFFLINE`   | Printer is not connected             |
+| `PRINTER_TIMEOUT`   | Print operation timed out            |
+| `JOB_NOT_FOUND`     | Job ID doesn't exist                 |
+| `JOB_DUPLICATE`     | Job with same idempotency key exists |
+| `INVALID_REQUEST`   | Invalid request payload              |
+| `RATE_LIMITED`      | Too many requests                    |
+
+## Job Lifecycle
 
 ```
-<install>\active_port.txt
-<install>\data\service-endpoint.json
-C:\ProgramData\XPThermalService\active_port.txt
-C:\ProgramData\XPThermalService\service-endpoint.json
+pending → queued → processing → printing → completed
+                                    ↓
+                                  failed → retry_scheduled → processing (retry)
+                                    ↓
+                               dead_letter (max retries exceeded)
+
+                              cancelled (user-initiated)
 ```
 
-The API key is available to loopback callers from `GET /api/auth/local-token`.
-
----
-
-## Smart Port Handling
-
-If 9100 is busy the service takes the next free port up to 9109 and publishes where it landed. `/health` reports both `port` and `configuredPort`, and the dashboard shows a note when they differ.
-
----
-
-## Testing
-
-```bash
-npm test        # 79 unit tests - decision logic, config durability, roles, CORS, drawer encoding
-npm run qa      # integration suite against the running service (read-only)
-npm run qa:write   # + create/update/delete a temporary printer
-npm run qa:full    # + send a physical test receipt
-```
-
-The unit tests cover the pure logic with fixtures captured from real hardware — including the `WorkOffline=true` queue that used to break everything.
-
-`scripts/deep-qa.js` exercises what only exists on a real machine: the PowerShell bridge, WMI event delivery, CORS on whichever port was actually bound, discovery, diagnosis and repair, config CRUD, the print pipeline, and resilience. It asserts behaviour, not just status codes — for example that a repair which did nothing does not claim success, and that an accepted job survives a restart.
-
-Latest full run: **79 unit tests and 62 integration checks, 0 failures**, including a physical receipt.
-
----
+| Status            | Description                             |
+| ----------------- | --------------------------------------- |
+| `pending`         | Job created, waiting to be processed    |
+| `queued`          | Job added to processing queue           |
+| `processing`      | Template being rendered                 |
+| `printing`        | Data being sent to printer              |
+| `completed`       | Print successful                        |
+| `failed`          | Print failed (may retry)                |
+| `retry_scheduled` | Waiting for retry (exponential backoff) |
+| `dead_letter`     | Failed after max retries                |
+| `cancelled`       | Cancelled by user                       |
 
 ## Development
 
 ```bash
-npm run dev            # ts-node, foreground
-npm run build          # tsc
-npm test               # jest
-npm run qa             # integration suite
-npm run lint
+npm run dev     # Development mode (ts-node)
+npm run build   # Build TypeScript
+npm start       # Start production
+npm test        # Run tests
+npm run lint    # Lint
+npm run cli     # CLI tool
 ```
 
-### Support switches
+## System Requirements
 
-| Variable | Effect |
-|----------|--------|
-| `XP_FORCE_SPOOLER_FALLBACK=1` | Skip WMI and use the spooler/registry path — reproduces a damaged-WMI machine |
-| `XP_CONFIG_PATH` | Path to `config.json` |
-| `XP_LOG_LEVEL` | `trace`…`fatal` |
+- **Node.js** 18+ (tested up to v25)
+- **Windows** 7/10/11
+- **Disk space**: 200MB minimum
+- USB drivers for USB printers
+- Network access for LAN printers
 
----
+## Deployment to Client PCs
+
+### One-Click Setup
+
+1. Copy the project folder to the client PC
+2. Right-click `setup.bat` → **Run as administrator**
+3. Done. The service is installed, running, and will auto-start on every boot
+
+### What the Installer Does
+
+The PowerShell installer (`scripts/install.ps1`) performs:
+
+1. **Pre-flight checks**: Admin rights, Node.js 18+, disk space (200MB), Windows version
+2. **Cleanup**: Stops and removes any previous service installations (including legacy names)
+3. **File deployment**: Copies dist, node_modules, public, config to `C:\ProgramData\XPThermalService`
+4. **Config management**: Backs up existing config, restores from backup if missing, creates from example as fallback
+5. **Port discovery**: Finds an available port in range 9100–9110
+6. **Service registration**: Registers via `node-windows` with `sc.exe` fallback
+7. **Recovery configuration**: Auto-restart on failure after 5s, 10s, 30s; delayed auto-start on boot
+8. **Watchdog**: Scheduled task running every 5 minutes under SYSTEM account to ensure the service stays alive
+9. **Health verification**: Waits up to 105s for service process + HTTP health endpoint
+
+### Service Management
+
+```powershell
+Get-Service "XP Thermal Print Service"   # Check status
+.\scripts\install.ps1 -Start
+.\scripts\install.ps1 -Stop
+.\scripts\install.ps1 -Restart
+.\scripts\install.ps1 -Repair             # Reinstall without losing config/data
+.\scripts\install.ps1 -Uninstall
+```
+
+### Auto-Start & Self-Healing
+
+- **Delayed auto-start** on Windows boot
+- **Windows Service Recovery**: Restarts after 5s, 10s, 30s on failure
+- **Watchdog**: Scheduled task checks every 5 minutes, restarts if stopped
+- **Active port file**: Written to `C:\ProgramData\XPThermalService\active_port.txt` and `C:\ProgramData\XPThermalService\data\active_port.txt` for external discovery
+
+### Installation Logs
+
+- **Install log**: `%TEMP%\XPThermalInstall_<timestamp>.log`
+- **Service logs**: `C:\ProgramData\XPThermalService\logs\`
+- **Watchdog log**: `C:\ProgramData\XPThermalService\logs\watchdog.log`
+- **Config backups**: `C:\ProgramData\XPThermalService\backups\`
+
+## Smart Port Handling
+
+The service uses smart port allocation across the range **9100–9110**:
+
+1. **Service side**: If port 9100 is in use, automatically tries 9101, 9102, etc.
+2. **Client side**: The ThermalPrintAdapter scans ports 9100–9109 to find the service
+3. **Port persistence**: The active port is written to `active_port.txt` and cached in the client's localStorage
+
+This keeps the POS connected if another application is using port 9100, the service restarts on a different port, or the port changes after a Windows update.
+
+## Connecting from XP Restaurant POS
+
+XP Restaurant POS connects automatically through its built-in `ThermalPrintAdapter`. The snippet below shows how the adapter works if you're building something similar.
+
+```ts
+import { getThermalAdapter, ThermalPrintService } from './printing-facility';
+
+const printService = ThermalPrintService.getInstance({
+  autoReconnect: true,
+  reconnectInterval: 5000,
+  healthCheckInterval: 30000,
+  onConnectionChange: (connected) => {
+    console.log(`Thermal service: ${connected ? 'connected' : 'disconnected'}`);
+  }
+});
+
+await printService.initialize();
+
+if (printService.isConnected()) {
+  const result = await printService.printBill(billData, {
+    copies: 2,
+    openCashDrawer: true
+  });
+  console.log('Print job:', result.jobId);
+}
+```
+
+The adapter caches the last successful port in localStorage, probes it first on reconnection, scans 9100–9109 if it fails, and retries with exponential backoff.
+
+```ts
+await printService.reconnect();              // Force reconnect with port re-discovery
+console.log(printService.getServiceUrl());   // Current service URL (for debugging)
+```
 
 ## Troubleshooting
 
-### The dashboard shows no printers
+### Service Won't Start
 
-1. **Find Printers** → does it report *"Printer connected but not installed"*? Install the driver; `Generic / Text Only` works for most ESC/POS units.
-2. Does it warn that **WMI is damaged**? Detection still works via the spooler; repair Windows with `winmgmt /salvagerepository` (Administrator) and reboot when convenient.
-3. Confirm Windows can see it at all:
-   ```powershell
-   Get-Printer | Select-Object Name, PortName, DriverName
-   ```
-   Nothing listed means no printer is installed — no software can find one that isn't there.
+1. Check logs: `C:\ProgramData\XPThermalService\logs\`
+2. Verify Node.js is in PATH: `node --version`
+3. Check Windows Event Viewer → Application logs
+4. Try repairing: `.\scripts\install.ps1 -Repair`
+5. Check install log: `%TEMP%\XPThermalInstall_*.log`
 
-### A printer shows "Not connected"
+### POS Can't Connect
 
-Press **Details** for the full reasoning. The common causes and what happens:
+1. Verify service is running: `Get-Service "XP Thermal Print Service"`
+2. Check the active port: `type C:\ProgramData\XPThermalService\active_port.txt`
+3. Test health endpoint: `curl http://127.0.0.1:9100/health`
+4. Check dashboard: `http://127.0.0.1:9100/dashboard`
+5. Check CORS: Ensure your POS origin is in `security.allowedOrigins`
 
-| Reported | Meaning | Handled by |
-|----------|---------|------------|
-| Moved to USB port `USB0xx` | Cable is in a different socket | **Fix this** repoints the queue |
-| Stale "Use Printer Offline" flag | Windows flag never cleared | Cleared automatically |
-| No USB printing device attached | Genuinely unplugged or powered off | Check the cable |
-| Out of paper / cover open | Physical | Load paper / close the cover |
-| Print Spooler not running | Windows service stopped | **Fix this** restarts it |
+### Printer Not Printing
 
-### POS can't connect
+1. Verify printer is online in the dashboard
+2. Send a test print from the dashboard
+3. Check if `printerName` matches the Windows printer name exactly (for USB printers)
+4. For network printers, verify IP and port are reachable
 
-1. `Get-Service "XP Thermal Print Service"`
-2. `type C:\ProgramData\XPThermalService\active_port.txt`
-3. `curl http://127.0.0.1:9100/health`
-4. A CORS rejection returns a 403 that names the origin and how to allow it. Loopback is always allowed on any port.
+### Common Issues
 
-### Common issues
-
-| Issue | Resolution |
-|-------|------------|
-| Port 9100 in use | Auto-switches to 9101–9109; check `active_port.txt` or `/health` |
-| `Invalid class "Win32_Printer"` | Damaged WMI; the spooler fallback handles it. Repair with `winmgmt /salvagerepository` |
-| New build not taking effect | `Restart-Service` does not cycle the Node child — use the dashboard restart or `POST /api/service/restart` |
-| Service refuses to start, exit code 4 | Another instance is running. Stop it, or use the Windows service rather than launching by hand |
-| Printers vanished from config | A config that fails to parse is backed up as `config.corrupt.*.json` and never overwritten — restore from it |
-| Cash drawer won't open | Try the other pin, or a longer pulse, via **Test drawer now** |
-| Config edited in Notepad | UTF-8 BOMs are handled; the file is rewritten without one |
-
-### Logs
-
-```
-C:\ProgramData\XPThermalService\logs\
-C:\ProgramData\XPThermalService\daemon\*.log
-%TEMP%\XPThermalInstall_*.log
-```
-
----
+| Issue                            | Solution                                                                           |
+| -------------------------------- | ---------------------------------------------------------------------------------- |
+| Port 9100 in use                 | Service auto-switches to 9101–9110; check `active_port.txt` for actual port        |
+| Service crashes on boot          | Check logs for config.json syntax errors; installer auto-repairs corrupt configs   |
+| CORS errors in Chrome            | Add your POS URL to `security.allowedOrigins`; PNA headers are included            |
+| Two services running             | Run `.\scripts\install.ps1 -Repair`; the installer cleans up legacy service names  |
+| Health check says "initializing" | Normal during USB port scanning at startup; wait a few seconds                     |
+| Service stops after manual start | Check for port conflicts or config errors in logs                                  |
+| Database corruption              | Automatically detected and rebuilt on startup; old DB backed up                    |
 
 ## Security
 
-- **Loopback binding** by default — not reachable from the network
-- **CORS**: loopback trusted on any port; wildcard patterns; optional private-LAN access; rejections explain the fix
-- **API key** via `X-API-Key`, served to loopback callers only
-- **Host validation**, **Helmet** headers, **rate limiting** (120/min + 20/sec burst, loopback exempt so a busy till is never throttled)
-- **Zod validation** on every request body; 1MB payload cap; 30s request timeout
-- **No injection surface in the PowerShell bridge** — printer names travel via environment variables and are never interpolated into script text, which is why names like `XP-80C @ Kitchen` or `Drucker (Küche)` are accepted
-- Restore and restart endpoints are **loopback-only**
-
----
+- **Localhost binding**: Service binds to `127.0.0.1` by default and is not reachable from the network
+- **CORS**: Configurable allowed origins; supports Chrome Private Network Access (PNA)
+- **Helmet**: Security headers via `helmet` middleware
+- **Rate limiting**: 120 req/min default + burst limiter (20 req/sec)
+- **API key**: Optional `X-API-Key` header authentication
+- **Host validation**: Only `localhost` and `127.0.0.1` accepted by default
+- **Payload size limit**: 1MB default (`maxPayloadSize`)
+- **Request timeout**: 30s per request
+- **Input validation**: Request bodies validated with Zod schemas
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Windows Service (node-windows) - LocalSystem, depends on     │
-│  Print Spooler, SCM recovery 5s/10s/30s, single-instance lock │
-├──────────────────────────────────────────────────────────────┤
-│  Express API (127.0.0.1:9100-9109)                            │
-│  Helmet · CORS policy · rate limit · Zod · SSE /api/events     │
-├──────────────────────────────────────────────────────────────┤
-│  Job Queue (sql.js) - priority, idempotency, backoff retry     │
-│  flushed on every exit path so accepted jobs are never lost    │
-├──────────────────────────────────────────────────────────────┤
-│  Template Engine - receipt · KOT · invoice · test · raw       │
-├──────────────────────────────────────────────────────────────┤
-│  Printer Manager                                              │
-│   ├── Device Watcher   WMI events -> ~1s reaction              │
-│   ├── Printer Resolver classify · rebind · plan repairs        │
-│   ├── USB Adapter      winspool RAW writes, cached helper      │
-│   └── Network Adapter  TCP 9100                                │
-├──────────────────────────────────────────────────────────────┤
-│  Windows Print System (one cached snapshot, single-flight)     │
-│   CIM -> WMI -> winspool EnumPrinters -> Get-Printer           │
-│   registry fallbacks for USB presence and OS identity          │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                   Windows Service                    │
+│                (node-windows daemon)                 │
+├─────────────────────────────────────────────────────┤
+│  Express API Server (localhost:9100-9110)            │
+│  ├── Helmet + CORS + PNA + Rate Limiter             │
+│  ├── /health, /dashboard                            │
+│  ├── /api/print, /api/jobs, /api/printers           │
+│  └── /api/config, /api/metrics, /api/system         │
+├─────────────────────────────────────────────────────┤
+│  Job Queue (SQLite persistence via sql.js)           │
+│  ├── Priority queue with concurrent processing      │
+│  ├── Idempotency key deduplication                  │
+│  └── Retry with exponential backoff                 │
+├─────────────────────────────────────────────────────┤
+│  Template Engine                                     │
+│  ├── Receipt, KOT, Invoice, Label, Test, Raw        │
+│  └── ESC/POS command builder                        │
+├─────────────────────────────────────────────────────┤
+│  Printer Manager                                     │
+│  ├── USB Adapter (Windows print spooler)            │
+│  ├── Network Adapter (TCP socket)                   │
+│  └── Auto-reconnect + health checks                 │
+└─────────────────────────────────────────────────────┘
 ```
 
-### Design rules
+## Commercial support
 
-- **One snapshot, shared.** A health check across N printers costs one PowerShell process, not 2N. Cached 4s with single-flight deduplication.
-- **Never trust one signal.** Every offline verdict requires corroboration.
-- **Degrade, don't fail.** Broken WMI, no event subscription, unwritable lock, missing helper assembly — each has a fallback, and the service says which mode it is in.
-- **Repair the cheap thing first.** Port, then flag, then queue, then spooler.
-- **Refuse to guess when wrong is expensive.** Order tickets going to the wrong station is worse than asking.
+XP Thermal Service is free forever. If you'd rather not wire it up yourself, XenithPulse offers:
 
----
+- **Integration** into your existing POS or web app
+- **Custom templates** for your receipt, KOT or label layouts
+- **A complete POS**: [XP Restaurant POS](https://xenithpulse.com/products/restaurant-pos), with thermal printing built in, for $299 once
 
-## System Requirements
+[Message us on WhatsApp](https://wa.me/97455911793?text=XP%20Thermal%20Service%20integration) · [xenithpulse.com](https://xenithpulse.com)
 
-- Windows 8 or later (Windows 10/11 recommended)
-- Node.js 18+
-- Administrator rights to install the service
+## Contributing
 
----
+Issues and pull requests are welcome. If this saved you a QZ Tray licence, a ⭐ helps other developers find it.
 
 ## License
 
-MIT License - See LICENSE file for details.
+[MIT](LICENSE) © XenithPulse

@@ -18,6 +18,7 @@ logs/
 # Configuration (keep example)
 config.json
 !config.example.json
+active_port.txt
 
 # Environment
 .env

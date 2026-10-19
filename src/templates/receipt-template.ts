@@ -23,6 +23,7 @@ import {
   QRErrorCorrection,
 } from '../types';
 import { EscPosBuilder } from '../escpos/builder';
+import { RECEIPT_CREDIT } from './brand';
 
 /**
  * Render a QR string to a 1-bit raster (same packed format as the logo) so it
@@ -282,7 +283,8 @@ function buildLines(data: LayoutData, options: ReceiptRenderOptions): StyledLine
     push(L.totalsRow('TOTAL', money(data.total)), 'l', { bold: true });
     divider();
     if (f.thankYou) push('Thank you!', 'c');
-    if (f.poweredBy) push('Powered By XenithPulse.com', 'c');
+    // The credit is not a toggle - it prints on every receipt.
+    for (const ln of RECEIPT_CREDIT) push(ln, 'c');
     return out;
   }
 
@@ -371,7 +373,8 @@ function buildLines(data: LayoutData, options: ReceiptRenderOptions): StyledLine
   blank();
   if (f.footerMessage && data.footerMessage) for (const ln of L.wordWrap(data.footerMessage)) push(ln, 'c');
   if (f.thankYou) push('Thank you!', 'c', { bold: p.heroTotal });
-  if (f.poweredBy) { blank(); push('Powered By XenithPulse.com', 'c'); }
+  blank();
+  for (const ln of RECEIPT_CREDIT) push(ln, 'c');
 
   return out;
 }

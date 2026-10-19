@@ -7,6 +7,7 @@ import { TemplateRenderer } from './engine';
 import { PrinterCapabilities, InvoicePayload } from '../types';
 import { EscPosBuilder, EscPosUtils } from '../escpos/builder';
 import { LayoutCalculator } from './layout-utils';
+import { RECEIPT_CREDIT } from './brand';
 
 export class InvoiceTemplate implements TemplateRenderer {
   render(payload: Record<string, unknown>, capabilities: PrinterCapabilities): Buffer {
@@ -138,7 +139,7 @@ export class InvoiceTemplate implements TemplateRenderer {
     builder.align(1);
     builder.newline();
 
-    builder.line('Powered By XenithPulse.com');
+    for (const ln of RECEIPT_CREDIT) builder.line(ln);
     builder.font('A');
     builder.newline();
 
