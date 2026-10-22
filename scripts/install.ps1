@@ -1392,6 +1392,10 @@ function Set-ConfigPrivateNetworkAccess {
     file is in place and before the service is registered or started, on a
     fresh install, an upgrade and -Repair (all go through Invoke-ServiceInstall).
 
+    No /T: see the comment inside. After the change a post-condition check
+    reads the ACL of up to 25 files; if any lost SYSTEM or Administrators the
+    change is reverted with "icacls /reset /T".
+
     A failure is a WARNING, not fatal: the install continues, but the log and
     the console say the folder is NOT hardened.
 #>
@@ -1405,7 +1409,13 @@ function Protect-InstallDirectory {
     }
 
     try {
-        $null = & icacls.exe $Path /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX" /T /C /Q 2>&1
+        # No /T on purpose. Windows already propagates the new inheritable ACEs
+        # to every child. With /T, "/inheritance:r" is applied to every FILE too:
+        # it strips their inherited ACEs and leaves them with an EMPTY DACL (nobody
+        # can read them, not even Administrators) while icacls still exits 0. That
+        # broke "require('node-windows')" during registration. Verified in a
+        # scratch folder: with /T files end with no ACEs, without /T they inherit.
+        $null = & icacls.exe $Path /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX" 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "icacls exited with code $LASTEXITCODE"
         }
@@ -1413,9 +1423,23 @@ function Protect-InstallDirectory {
         # triggers\ is the one place a standard user must be able to write.
         $triggerDir = Join-Path $Path "triggers"
         if (Test-Path $triggerDir) {
-            $null = & icacls.exe $triggerDir /grant:r "*S-1-5-32-545:(OI)(CI)M" /T /C /Q 2>&1
+            $null = & icacls.exe $triggerDir /grant:r "*S-1-5-32-545:(OI)(CI)M" 2>&1
             if ($LASTEXITCODE -ne 0) {
                 throw "icacls (triggers) exited with code $LASTEXITCODE"
+            }
+        }
+
+        # Self-check: files must still be readable by SYSTEM and Administrators.
+        # An empty DACL would make the service and the installer itself fail later
+        # with confusing errors, so undo the change and report it instead.
+        $probeFiles = Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 25
+        foreach ($probe in $probeFiles) {
+            $sids = @((Get-Acl -LiteralPath $probe.FullName -ErrorAction Stop).Access | ForEach-Object {
+                try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { "$($_.IdentityReference)" }
+            })
+            if (($sids -notcontains "S-1-5-18") -or ($sids -notcontains "S-1-5-32-544")) {
+                $null = & icacls.exe $Path /reset /T /C /Q 2>&1
+                throw "files under the install directory lost their permissions ($($probe.FullName)); the ACL change was reverted"
             }
         }
 
