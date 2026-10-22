@@ -156,18 +156,15 @@ const ServerConfigSchema = z.object({
 });
 
 /**
- * Origins the POS front-end is served from.
- *
- * These are merged into every configuration on load, so a freshly imaged till
- * can talk to the service without anyone editing config.json. Loopback is
- * already trusted on any port; these cover the named host and the LAN address
- * the POS is published on.
+ * Default allowed origins for a NEW configuration: the service's own
+ * dashboard on loopback only. Loopback is trusted on any port by OriginPolicy,
+ * so these entries are explicit documentation more than a requirement. Any
+ * other site (a POS, a vendor host) must be added to config.json on purpose;
+ * nothing is injected on load.
  */
-export const POS_DEFAULT_ORIGINS = [
-  'http://pos.xenithpulse.local:8090',
-  'http://pos.xenithpulse.local:8080',
-  'http://127.0.0.1:8080',
-  'http://127.0.0.1:8090'
+export const DEFAULT_ALLOWED_ORIGINS = [
+  'http://localhost:9100',
+  'http://127.0.0.1:9100'
 ];
 
 const SecurityConfigSchema = z.object({
@@ -177,13 +174,14 @@ const SecurityConfigSchema = z.object({
   // port 9100 to 9101 keeps working.
   allowedOrigins: z
     .array(z.string())
-    .default([...POS_DEFAULT_ORIGINS, 'http://localhost:3000', 'http://127.0.0.1:3000']),
+    .default([...DEFAULT_ALLOWED_ORIGINS]),
   allowedHosts: z.array(z.string()).default(['localhost', '127.0.0.1']),
   rateLimitPerMinute: z.number().min(1).max(1000).default(60),
   enableApiKey: z.boolean().default(true),
   apiKey: z.string().optional(),
   maxPayloadSize: z.number().min(1024).max(10 * 1024 * 1024).default(1024 * 1024), // 1MB default, 10MB max
-  allowPrivateNetwork: z.boolean().default(true)
+  // Off by default: trusting the whole private LAN is an explicit opt-in.
+  allowPrivateNetwork: z.boolean().default(false)
 });
 
 const QueueConfigSchema = z.object({
@@ -230,7 +228,8 @@ const LoggingConfigSchema = z.object({
 });
 
 const BackupConfigSchema = z.object({
-  enabled: z.boolean().default(true),
+  // Off by default: a new install must not poll a POS until it is configured.
+  enabled: z.boolean().default(false),
   // Loopback works regardless of the box's LAN IP because Caddy publishes the
   // POS on the host's port 8080.
   posBaseUrl: z.string().default('http://127.0.0.1:8080'),
@@ -298,9 +297,6 @@ export class ConfigManager {
   /** Printers deleted in this process, so a merge never resurrects them. */
   private readonly deletedPrinterIds = new Set<string>();
 
-  /** Set during load when POS origins had to be merged in. */
-  private pendingPosOriginSave = false;
-
   /** Set during load when a too-short retry window was migrated. */
   private pendingQueueRetrySave = false;
 
@@ -310,8 +306,7 @@ export class ConfigManager {
 
     // Persist load-time migrations once, after load has finished, so the file
     // reflects what the service is actually enforcing.
-    if ((this.pendingPosOriginSave || this.pendingQueueRetrySave) && !this.loadFailed) {
-      this.pendingPosOriginSave = false;
+    if (this.pendingQueueRetrySave && !this.loadFailed) {
       this.pendingQueueRetrySave = false;
       try {
         this.saveConfig();
@@ -424,23 +419,6 @@ export class ConfigManager {
 
     this.lastSeenStamp = this.stampFile();
     const config = result.data as ServiceConfig;
-
-    // Guarantee the POS can reach the service on every machine, including ones
-    // upgraded from a config written before these hosts existed.
-    const missingPosOrigins = POS_DEFAULT_ORIGINS.filter(
-      (origin) => !config.security.allowedOrigins.includes(origin)
-    );
-    if (missingPosOrigins.length > 0) {
-      config.security.allowedOrigins = [
-        ...config.security.allowedOrigins,
-        ...missingPosOrigins
-      ];
-      console.log(`Added ${missingPosOrigins.length} POS origin(s) to the allow-list`);
-      // Write them through so they show up in the Settings screen and survive
-      // as a visible part of the configuration, rather than being invisibly
-      // re-applied on every start.
-      this.pendingPosOriginSave = true;
-    }
 
     /*
      * Widen a retry window that is too short to survive a printer restart.

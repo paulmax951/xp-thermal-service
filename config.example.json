@@ -6,12 +6,8 @@
   },
   "security": {
     "allowedOrigins": [
-      "http://localhost:3000",
-      "http://127.0.0.1:3000",
-      "http://localhost:3001",
-      "http://127.0.0.1:3001",
-      "http://pos.xenithpulse.local:*",
-      "https://pos.xenithpulse.local:*"
+      "http://localhost:9100",
+      "http://127.0.0.1:9100"
     ],
     "allowedHosts": [
       "localhost",
@@ -19,7 +15,8 @@
     ],
     "rateLimitPerMinute": 120,
     "enableApiKey": true,
-    "maxPayloadSize": 1048576
+    "maxPayloadSize": 1048576,
+    "allowPrivateNetwork": false
   },
   "queue": {
     "maxConcurrentJobs": 3,
@@ -46,7 +43,7 @@
     "minIntervalMs": 900000
   },
   "backup": {
-    "enabled": true,
+    "enabled": false,
     "posBaseUrl": "http://127.0.0.1:8080",
     "pollIntervalMs": 30000,
     "timeoutMs": 300000,
