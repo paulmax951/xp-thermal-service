@@ -1396,6 +1396,79 @@ function Set-ConfigPrivateNetworkAccess {
 }
 
 # ============================================================
+# INSTALL DIRECTORY PERMISSIONS
+# ============================================================
+
+<#
+    Protect-InstallDirectory. Lock the ACL of the install directory.
+
+    Why: C:\ProgramData inherits an ACE that lets any local user CREATE files
+    in it, and the service runs index.js and node_modules from this folder as
+    LocalSystem. Node resolves node_modules\<pkg>.js before
+    node_modules\<pkg>\, so a file planted by a standard user would run as
+    SYSTEM. The installer never set an ACL, so every folder below inherited it.
+
+    Result:
+        SYSTEM          Full control   (the service runs as LocalSystem, so
+                                        logs\, data\ and backups\ stay writable)
+        Administrators  Full control
+        Users           Read and execute only
+    Inheritance from C:\ProgramData is removed (/inheritance:r).
+
+    SIDs, not names: the group names are localized (Spanish Windows calls them
+    "SYSTEM", "Administradores", "Usuarios"), SIDs are not.
+        *S-1-5-18 = SYSTEM, *S-1-5-32-544 = Administrators, *S-1-5-32-545 = Users
+
+    Exception, triggers\ only: the POS app (a standard user) drops
+    triggers\restart.trigger through trigger-restart.ps1 to ask for a service
+    restart. Users keep Modify on that one folder. The service only logs the
+    first 500 characters of the file and deletes it, it never executes it, so
+    the worst a user can do there is request a restart.
+
+    Idempotent: /grant:r REPLACES the ACE of each trustee, so running it again
+    on an already protected folder leaves the same result. Called after every
+    file is in place and before the service is registered or started, on a
+    fresh install, an upgrade and -Repair (all go through Invoke-ServiceInstall).
+
+    A failure is a WARNING, not fatal: the install continues, but the log and
+    the console say the folder is NOT hardened.
+#>
+function Protect-InstallDirectory {
+    param([string]$Path = $InstallPath)
+
+    if (-not (Test-Path $Path)) {
+        Write-WARN "Install directory not found - permissions NOT hardened"
+        Write-Log "Protect-InstallDirectory: $Path does not exist" "WARNING"
+        return $false
+    }
+
+    try {
+        $null = & icacls.exe $Path /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX" /T /C /Q 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "icacls exited with code $LASTEXITCODE"
+        }
+
+        # triggers\ is the one place a standard user must be able to write.
+        $triggerDir = Join-Path $Path "triggers"
+        if (Test-Path $triggerDir) {
+            $null = & icacls.exe $triggerDir /grant:r "*S-1-5-32-545:(OI)(CI)M" /T /C /Q 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "icacls (triggers) exited with code $LASTEXITCODE"
+            }
+        }
+
+        Write-OK "Install directory permissions restricted"
+        Write-Log "Install directory ACL restricted: SYSTEM and Administrators full, Users read/execute (Users modify on triggers only)"
+        return $true
+    }
+    catch {
+        Write-WARN "Could not restrict install directory permissions - the folder is NOT hardened"
+        Write-Log "Could not restrict permissions on ${Path}: $_ - the folder is NOT hardened" "WARNING"
+        return $false
+    }
+}
+
+# ============================================================
 # FIREWALL MANAGEMENT
 # ============================================================
 
@@ -2412,6 +2485,10 @@ function Invoke-ServiceInstall {
     } catch {}
 
     Write-OK "Configuration ready"
+
+    # All files and the config are in place; lock the folder BEFORE the service
+    # is registered and started in Step 6. Non-fatal, see Protect-InstallDirectory.
+    $null = Protect-InstallDirectory
     
     Write-StepComplete
     
